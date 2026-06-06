@@ -1,0 +1,15 @@
+[Unit]
+Description=Literature Clock InkyWHAT
+After=multi-user.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/literature-clock_inkywhat
+ExecStartPre=/sbin/modprobe i2c-dev
+ExecStart=/usr/bin/python3 /home/YOUR_USERNAME/literature-clock_inkywhat/quote_display.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

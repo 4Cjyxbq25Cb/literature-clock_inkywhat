@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import sys
 import os
 import random
 import logging
@@ -10,139 +9,164 @@ from datetime import datetime
 from PIL import Image, ImageFont, ImageDraw
 from inky import InkyWHAT
 
-# Logging setup
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
 
-# Font size settings
-large_quote_font_size = 36
+large_quote_font_size  = 36
 medium_quote_font_size = 28
-small_quote_font_size = 20
-min_quote_font_size = 14  # Set a reasonable minimum for readability
-base_author_font_size = 14  # Make author font size smaller for single-line display
-line_spacing = 6  # Line spacing between lines
-max_display_width = 400  # Maximum width for the text
-max_display_height = 280  # Maximum height for the text (excluding author text)
+small_quote_font_size  = 20
+min_quote_font_size    = 14
+base_author_font_size  = 14
+line_spacing           = 6
+max_display_width      = 400
+max_display_height     = 280
+
+FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
 
 class QuoteDisplay:
-    """Class to manage the quotes and display on InkyWHAT"""
+    """Displays literary quotes on an InkyWHAT e-ink screen.
 
-    inky_display = InkyWHAT('red')  # Use 'red' as the color variant
+    Each minute a random quote for that time is shown. The time portion
+    of the quote is always rendered in red; the surrounding text in black.
+    Font size is reduced automatically so that every quote fits on screen.
+    """
+
+    inky_display = InkyWHAT('red')  # colour variant: 'red' or 'yellow'
 
     def __init__(self, fixedTime=''):
-        self.fixedTime = fixedTime
+        self.fixedTime  = fixedTime
         self.currentMin = -1
         self.quote_data = {}
         self.loadData()
         self.update_display()
 
+    # ── Data loading ───────────────────────────────────────────────────────
+
     def loadData(self):
-        """Load quote data from JSON files"""
+        """Load all per-minute quote JSON files into memory."""
         self.quote_data = {}
-        base_path = "/home/pi/literature-clock_inkywhat/docs/times"
-        for hours in range(24):
-            for mins in range(60):
-                time_str = "{:02d}_{:02d}".format(hours, mins)
-                filename = f"{base_path}/{time_str}.json"
-                if os.path.exists(filename):
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'times')
+        for h in range(24):
+            for m in range(60):
+                key  = f'{h:02d}_{m:02d}'
+                path = os.path.join(base, f'{key}.json')
+                if os.path.exists(path):
                     try:
-                        with open(filename, 'r') as jfile:
-                            self.quote_data[time_str] = json.load(jfile)
+                        with open(path, encoding='utf-8') as f:
+                            self.quote_data[key] = json.load(f)
                     except Exception as e:
-                        log.error(f"Cannot load {filename}: {e}")
+                        log.error(f'Cannot load {path}: {e}')
 
     def get_quote(self, time_str):
-        """Get a quote for a specific time"""
+        """Return a random quote dict for the given HH_MM key."""
         if time_str in self.quote_data:
             return random.choice(self.quote_data[time_str])
-        else:
-            return {"quote_first": f"There is no quote for {time_str}", "quote_time_case": "", "quote_last": "", "title": "N/A", "author": "Marcel Kurtz"}
+        return {
+            'quote_first':     '',
+            'quote_time_case': time_str.replace('_', ':'),
+            'quote_last':      '',
+            'title':           'N/A',
+            'author':          'N/A',
+        }
+
+    # ── Text layout ────────────────────────────────────────────────────────
+
+    def word_parts(self, first, time_str, last):
+        """Split all three quote segments into (word, part) tuples.
+
+        part is one of 'first', 'time', or 'last', used to pick the
+        correct ink color when drawing.
+        """
+        result = []
+        for w in first.split():
+            result.append((w, 'first'))
+        for w in time_str.split():
+            result.append((w, 'time'))
+        for w in last.split():
+            result.append((w, 'last'))
+        return result
+
+    def wrap(self, word_parts, font, max_width):
+        """Wrap word_parts into display lines, preserving per-word part info."""
+        lines, line, w = [], [], 0
+        sp = font.getbbox(' ')[2]
+        for word, part in word_parts:
+            ww  = font.getbbox(word)[2]
+            gap = sp if line else 0
+            if line and w + gap + ww > max_width:
+                lines.append(line)
+                line, w = [(word, part)], ww
+            else:
+                line.append((word, part))
+                w += gap + ww
+        if line:
+            lines.append(line)
+        return lines
+
+    def line_width(self, line, font):
+        sp = font.getbbox(' ')[2]
+        return sum(font.getbbox(w)[2] for w, _ in line) + sp * (len(line) - 1)
+
+    # ── Display update loop ────────────────────────────────────────────────
 
     def update_display(self):
-        """Update the display with the current time and quote"""
+        """Main loop: refresh the display once per minute."""
         while True:
             now = datetime.now()
-            current_time = now.strftime('%H_%M')
+            key = now.strftime('%H_%M')
 
             if now.minute != self.currentMin:
                 self.currentMin = now.minute
-                log.debug(f'Updating display for {current_time}')
+                log.debug(f'Updating display for {key}')
 
-                quote_info = self.get_quote(current_time if not self.fixedTime else self.fixedTime)
+                q     = self.get_quote(key if not self.fixedTime else self.fixedTime)
+                clean = lambda s: s.replace('<br/>', ' ').replace('<br>', ' ')
+                first = clean(q['quote_first'])
+                ttime = q['quote_time_case'].strip()
+                last  = clean(q['quote_last'])
+                full  = f'{first} {ttime} {last}'.strip()
 
-                img = Image.new("P", (400, 300), QuoteDisplay.inky_display.WHITE)
+                # Choose starting font size by quote length; shrink until it fits
+                if   len(full) < 100: font_size = large_quote_font_size
+                elif len(full) < 200: font_size = medium_quote_font_size
+                else:                 font_size = small_quote_font_size
+
+                while font_size >= min_quote_font_size:
+                    font   = ImageFont.truetype(FONT, font_size)
+                    parts  = self.word_parts(first, ttime, last)
+                    lines  = self.wrap(parts, font, max_display_width)
+                    height = len(lines) * (font_size + line_spacing) - line_spacing
+                    if height <= max_display_height:
+                        break
+                    font_size -= 2
+
+                img  = Image.new('P', (400, 300), self.inky_display.WHITE)
                 draw = ImageDraw.Draw(img)
+                sp   = font.getbbox(' ')[2]
+                y    = (max_display_height - height) // 2
 
-                # Process the text and handle <br> tags
-                quote_first = quote_info['quote_first'].replace('<br>', '\n').replace('<br/>', '\n')
-                quote_time = quote_info['quote_time_case'].strip()  # Remove any leading/trailing spaces
-                quote_last = quote_info['quote_last'].replace('<br>', '\n').replace('<br/>', '\n')
-
-                # Separate the time to be on its own line
-                full_quote = f"{quote_first}\n{quote_time}\n{quote_last}"
-
-                # Choose font size based on the length of the quote
-                quote_length = len(full_quote)
-                if quote_length < 100:
-                    quote_font_size = large_quote_font_size
-                elif quote_length < 200:
-                    quote_font_size = medium_quote_font_size
-                else:
-                    quote_font_size = small_quote_font_size
-
-                quote_font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', quote_font_size)
-                wrapped_quote = self.wrap_text(full_quote, quote_font, max_display_width)
-
-                # Center the text vertically within the available space
-                total_text_height = self.calculate_text_height(wrapped_quote, quote_font)
-                y_position = (max_display_height - total_text_height) // 2
-
-                lines = wrapped_quote.split('\n')
                 for line in lines:
-                    # Calculate x_position to ensure the text is centered but fully uses the available width
-                    text_width = draw.textlength(line, font=quote_font)
-                    x_position = max((max_display_width - text_width) // 2, 0)  # Center text horizontally, ensure no negative value
-                    draw.text((x_position, y_position), line, fill=QuoteDisplay.inky_display.BLACK, font=quote_font)
-                    y_position += quote_font_size + line_spacing
+                    x = max((max_display_width - self.line_width(line, font)) // 2, 0)
+                    for i, (word, part) in enumerate(line):
+                        color = self.inky_display.RED if part == 'time' else self.inky_display.BLACK
+                        draw.text((x, y), word, fill=color, font=font)
+                        x += font.getbbox(word)[2]
+                        if i < len(line) - 1:
+                            x += sp
+                    y += font_size + line_spacing
 
-                # Author text and positioning - Ensure it's in one line at the bottom
-                author_text = f"{quote_info['title']} - {quote_info['author']}"
-                author_font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', base_author_font_size)
-                author_text_width, author_text_height = draw.textbbox((0, 0), author_text, font=author_font)[2:4]
+                author = f"{q['title']} – {q['author']}"
+                afont  = ImageFont.truetype(FONT, base_author_font_size)
+                ah     = draw.textbbox((0, 0), author, font=afont)[3]
+                draw.text((10, 300 - ah - 10), author, fill=self.inky_display.BLACK, font=afont)
 
-                # Positioning the author text at the bottom-left corner
-                draw.text((10, 300 - author_text_height - 10), author_text, fill=QuoteDisplay.inky_display.BLACK, font=author_font)
-
-                # Rotate the image and display it
                 img = img.rotate(180, expand=True)
-                QuoteDisplay.inky_display.set_image(img)
-                QuoteDisplay.inky_display.show()
+                self.inky_display.set_image(img)
+                self.inky_display.show()
 
             time.sleep(60)
 
-    def wrap_text(self, text, font, max_width):
-        """Wrap text for drawing on the display"""
-        lines = []
-        words = text.split()
-        current_line = ""
 
-        for word in words:
-            # Test if adding the word exceeds the maximum width
-            if font.getbbox(current_line + word)[2] <= max_width:
-                current_line += word + " "
-            else:
-                lines.append(current_line.strip())
-                current_line = word + " "
-
-        if current_line:
-            lines.append(current_line.strip())
-
-        return "\n".join(lines)
-
-    def calculate_text_height(self, text, font):
-        """Calculate the height of the wrapped text"""
-        lines = text.split('\n')
-        return len(lines) * (font.size + line_spacing) - line_spacing
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     QuoteDisplay()
