@@ -52,10 +52,7 @@ class QuoteDisplay:
     def get_quote(self, time_str):
         if time_str in self.quote_data:
             return random.choice(self.quote_data[time_str])
-        return {
-            'quote_first': '', 'quote_time_case': time_str.replace('_', ':'),
-            'quote_last': '', 'title': 'N/A', 'author': 'N/A'
-        }
+        return None
 
     # ── Kürzung langer Zitate ──────────────────────────────────────────────
 
@@ -149,6 +146,8 @@ class QuoteDisplay:
             if now.minute != self.currentMin:
                 self.currentMin = now.minute
                 q = self.get_quote(key if not self.fixedTime else self.fixedTime)
+                if q is None:
+                    continue
 
                 clean = lambda s: s.replace('<br/>', ' ').replace('<br>', ' ')
                 first = clean(q['quote_first'])
